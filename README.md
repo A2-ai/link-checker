@@ -1,19 +1,40 @@
-rbqm-link-checker
-=================
+link-checker
+============
 
-rbqm-link-checker is a tool to check the status of the links in the RBQM dashboard. It uses the cookie value to authenticate the user and then
-incrementally crawls the entire site for all links to check their validity.
-For any valid links on a page it follows any that match the domain
-to ultimately check every link a user would have access to across the site.
+A generic web link checker tool that crawls a website and validates all links within the same domain. The tool starts from a given URL and incrementally discovers and checks all linked pages, building a comprehensive map of the site's link structure and identifying any broken links.
 
+## Features
 
-To run the development version of the tool via cargo:
+- Multi-threaded crawling for efficient link checking
+- Domain-scoped crawling (only follows links within the same domain)
+- Comprehensive link validation with HTTP status checking
+- JSON output with detailed results
+- Simple command-line interface
 
+## Usage
+
+To run the link checker:
+
+```bash
+cargo run -- --url https://example.com
 ```
-cargo run -- --domain rbqm-dashboard-dev.gilead.com --cookie-value=PFa...FULLCOOKIE...IkZvr0=
+
+Or using the short form:
+
+```bash
+cargo run -- -u https://example.com
 ```
 
-You can also use `.env` file to store the domain and cookie values.
-Check the `.env.sample` file for the format.
+## Output
 
-We'll build a binary once this gets a couple reps in and distribute it that way in the future.
+The tool generates two JSON files:
+- `bad_urls.json`: List of URLs that returned error status codes
+- `url_map.json`: Complete mapping of each page to all links found on that page
+
+## Building
+
+Build the release binary:
+
+```bash
+cargo build --release
+```

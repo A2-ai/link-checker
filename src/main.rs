@@ -4,10 +4,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use clap::{Arg, Command};
-use cookie::Cookie;
-use reqwest::blocking::{Client, ClientBuilder};
-use reqwest::cookie::Jar;
+use clap::Parser;
+use reqwest::blocking::Client;
 use reqwest::Url;
 use scraper::{Html, Selector};
 use serde::Serialize;
@@ -27,17 +25,6 @@ struct CrawlCommand {
     extract_links: bool,
 }
 
-fn create_secure_http_only_cookie(
-    name: &str,
-    value: &str,
-    domain: &str,
-) -> cookie::CookieBuilder<'static> {
-    Cookie::build((name.to_owned(), value.to_owned()))
-        .http_only(true)
-        .secure(true)
-        .path("/")
-        .domain(domain.to_owned())
-}
 
 fn visit_page(client: &Client, command: &CrawlCommand) -> Result<Vec<Url>, Error> {
     println!("Checking {:#}", command.url);
@@ -87,11 +74,20 @@ struct CrawlState {
 impl CrawlState {
     fn new(start_url: &Url) -> CrawlState {
         let mut visited_pages = HashSet::new();
-        visited_pages.insert(start_url.as_str().to_string());
+        let normalized_url = Self::normalize_url(start_url);
+        visited_pages.insert(normalized_url);
         CrawlState {
             domain: start_url.domain().unwrap().to_string(),
             visited_pages,
         }
+    }
+
+    /// Remove the fragment (hash) part of a URL to avoid treating
+    /// page.html#section1 and page.html#section2 as different pages
+    fn normalize_url(url: &Url) -> String {
+        let mut normalized = url.clone();
+        normalized.set_fragment(None);
+        normalized.to_string()
     }
 
     /// Determine whether links within the given page should be extracted.
@@ -105,9 +101,10 @@ impl CrawlState {
     }
 
     /// Mark the given page as visited, returning false if it had already
-    /// been visited.
+    /// been visited. Uses normalized URL (without fragment) for comparison.
     fn mark_visited(&mut self, url: &Url) -> bool {
-        self.visited_pages.insert(url.to_string())
+        let normalized_url = Self::normalize_url(url);
+        self.visited_pages.insert(normalized_url)
     }
 }
 
@@ -122,26 +119,14 @@ fn spawn_crawler_threads(
     command_receiver: mpsc::Receiver<CrawlCommand>,
     result_sender: mpsc::Sender<CrawlResult>,
     thread_count: u32,
-    domain: String,
-    cookie_value: String,
 ) {
     let command_receiver = Arc::new(Mutex::new(command_receiver));
 
     for _ in 0..thread_count {
         let result_sender = result_sender.clone();
         let command_receiver = command_receiver.clone();
-        let domain = domain.clone();
-        let cookie_value = cookie_value.clone();
         thread::spawn(move || {
-            let jar = Jar::default();
-            let cookie =
-                create_secure_http_only_cookie("AWSELBAuthSessionCookie-0", &cookie_value, &domain);
-            let url = format!("https://{}", domain).parse::<Url>().unwrap();
-            jar.add_cookie_str(&cookie.to_string(), &url);
-            let client = ClientBuilder::new()
-                .cookie_provider(Arc::new(jar))
-                .build()
-                .unwrap();
+            let client = Client::new();
             loop {
                 let command_result = {
                     let receiver_guard = command_receiver.lock().unwrap();
@@ -214,43 +199,27 @@ fn control_crawl(
     }
 }
 
-fn check_links(start_url: Url, domain: String, cookie_value: String) -> UrlResults {
+fn check_links(start_url: Url) -> UrlResults {
     let (result_sender, result_receiver) = mpsc::channel::<CrawlResult>();
     let (command_sender, command_receiver) = mpsc::channel::<CrawlCommand>();
-    spawn_crawler_threads(command_receiver, result_sender, 8, domain, cookie_value);
+    spawn_crawler_threads(command_receiver, result_sender, 8);
     control_crawl(start_url, command_sender, result_receiver)
 }
 
+#[derive(Parser)]
+#[command(name = "link-checker")]
+#[command(about = "A tool to check the validity of links on a website")]
+struct Args {
+    /// The URL to start crawling from
+    #[arg(long, short)]
+    url: String,
+}
+
 fn main() {
-    dotenvy::dotenv().ok(); 
-    let matches = Command::new("crawler")
-        .arg(
-            Arg::new("domain")
-                .long("domain")
-                .value_name("DOMAIN")
-                .required(true)
-                .env("RBQM_LINK_CHECKER_DOMAIN")
-                .help("The domain to crawl"),
-        )
-        .arg(
-            Arg::new("cookie_value")
-                .long("cookie-value")
-                .value_name("COOKIE_VALUE")
-                .required(true)
-                .env("RBQM_LINK_CHECKER_COOKIE_VALUE")
-                .help("The value of the AWSELBAuthSessionCookie-0 cookie"),
-        )
-        .get_matches();
-
-    let domain = matches.get_one::<String>("domain").unwrap().to_string();
-    let cookie_value = matches
-        .get_one::<String>("cookie_value")
-        .unwrap()
-        .to_string();
-
-    let start_url = Url::parse(&format!("https://{}", domain)).unwrap();
+    let args = Args::parse();
+    let start_url = Url::parse(&args.url).expect("Invalid URL provided");
     let start_time = Instant::now();
-    let url_results = check_links(start_url, domain, cookie_value);
+    let url_results = check_links(start_url);
 
     let bad_urls_file = File::create("bad_urls.json").unwrap();
     serde_json::to_writer_pretty(bad_urls_file, &url_results.bad_urls).unwrap();
@@ -258,7 +227,46 @@ fn main() {
     let url_map_file = File::create("url_map.json").unwrap();
     serde_json::to_writer_pretty(url_map_file, &url_results.url_map).unwrap();
 
-    println!("Bad URLs: {:#?}", url_results.bad_urls);
-    dbg!(url_results.url_map);
-    println!("Crawling took {:#?}", start_time.elapsed());
+    // Calculate summary statistics
+    let pages_crawled = url_results.url_map.len();
+    let mut all_unique_urls = std::collections::HashSet::new();
+    
+    // Add all pages that were crawled
+    for page_url in url_results.url_map.keys() {
+        all_unique_urls.insert(page_url.clone());
+    }
+    
+    // Add all links found on those pages
+    for links in url_results.url_map.values() {
+        for link in links {
+            all_unique_urls.insert(link.clone());
+        }
+    }
+    
+    let total_unique_urls = all_unique_urls.len();
+    let broken_links_count = url_results.bad_urls.len();
+
+    // Print summary
+    print!("Crawled {} pages, checked {} unique URLs", pages_crawled, total_unique_urls);
+    if broken_links_count == 0 {
+        println!(", found no broken links.");
+    } else if broken_links_count == 1 {
+        println!(", found 1 broken link.");
+    } else {
+        println!(", found {} broken links.", broken_links_count);
+    }
+
+    // Show broken links if 20 or fewer, otherwise refer to file
+    if broken_links_count > 0 {
+        if broken_links_count <= 20 {
+            println!("\nBroken links:");
+            for bad_url in &url_results.bad_urls {
+                println!("  - {}", bad_url);
+            }
+        } else {
+            println!("\nSee bad_urls.json for the complete list of broken links.");
+        }
+    }
+
+    println!("\nCrawling completed in {:#?}", start_time.elapsed());
 }
