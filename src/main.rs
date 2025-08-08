@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use reqwest::blocking::Client;
@@ -23,47 +23,65 @@ enum Error {
 struct CrawlCommand {
     url: Url,
     extract_links: bool,
+    source_page: Option<Url>,
 }
 
 
 fn visit_page(client: &Client, command: &CrawlCommand) -> Result<Vec<Url>, Error> {
     println!("Checking {:#}", command.url);
-    let response = client.get(command.url.clone()).send()?;
-    if !response.status().is_success() {
+    
+    // Retry logic for 5xx errors with exponential backoff
+    let mut attempts = 0;
+    let max_retries = 3;
+    loop {
+        let response = client.get(command.url.clone()).send()?;
+        
+        if response.status().is_success() {
+            let mut link_urls = Vec::new();
+            if !command.extract_links {
+                return Ok(link_urls);
+            }
+        
+            let base_url = response.url().to_owned();
+            let body_text = response.text()?;
+            let start_time = Instant::now();
+            let document = Html::parse_document(&body_text);
+        
+            let selector = Selector::parse("a").unwrap();
+            let href_values = document
+                .select(&selector)
+                .filter_map(|element| element.value().attr("href"));
+            for href in href_values {
+                match base_url.join(href) {
+                    Ok(link_url) => {
+                        link_urls.push(link_url);
+                    }
+                    Err(err) => {
+                        println!("On {base_url:#}: ignored unparsable {href:?}: {err}");
+                    }
+                }
+            }
+            println!(
+                "Parsed {:#?} and found {:#?} URLs in {:#?}",
+                command.url.to_string(),
+                link_urls.len(),
+                start_time.elapsed()
+            );
+            return Ok(link_urls);
+        }
+        
+        // Check if it's a 5xx error that we should retry
+        if response.status().is_server_error() && attempts < max_retries {
+            attempts += 1;
+            let delay = Duration::from_millis(100 * (2_u64.pow(attempts - 1)));
+            println!("Got 5xx error for {:#}, retrying in {:#?} (attempt {}/{})", command.url, delay, attempts, max_retries);
+            thread::sleep(delay);
+            continue;
+        }
+        
         return Err(Error::BadResponse(response.status().to_string()));
     }
 
-    let mut link_urls = Vec::new();
-    if !command.extract_links {
-        return Ok(link_urls);
-    }
-
-    let base_url = response.url().to_owned();
-    let body_text = response.text()?;
-    let start_time = Instant::now();
-    let document = Html::parse_document(&body_text);
-
-    let selector = Selector::parse("a").unwrap();
-    let href_values = document
-        .select(&selector)
-        .filter_map(|element| element.value().attr("href"));
-    for href in href_values {
-        match base_url.join(href) {
-            Ok(link_url) => {
-                link_urls.push(link_url);
-            }
-            Err(err) => {
-                println!("On {base_url:#}: ignored unparsable {href:?}: {err}");
-            }
-        }
-    }
-    println!(
-        "Parsed {:#?} and found {:#?} URLs in {:#?}",
-        command.url.to_string(),
-        link_urls.len(),
-        start_time.elapsed()
-    );
-    Ok(link_urls)
 }
 
 struct CrawlState {
@@ -114,7 +132,7 @@ struct FoundUrls {
     links: Vec<Url>,
 }
 
-type CrawlResult = Result<FoundUrls, (Url, Error)>;
+type CrawlResult = Result<FoundUrls, (CrawlCommand, Error)>;
 fn spawn_crawler_threads(
     command_receiver: mpsc::Receiver<CrawlCommand>,
     result_sender: mpsc::Sender<CrawlResult>,
@@ -138,11 +156,11 @@ fn spawn_crawler_threads(
                 };
                 let crawl_result = match visit_page(&client, &crawl_command) {
                     Ok(link_urls) => Ok(FoundUrls {
-                        url: crawl_command.url,
+                        url: crawl_command.url.clone(),
                         links: link_urls,
 
                     }),
-                    Err(error) => Err((crawl_command.url, error)),
+                    Err(error) => Err((crawl_command, error)),
                 };
                 result_sender.send(crawl_result).unwrap();
             }
@@ -151,8 +169,14 @@ fn spawn_crawler_threads(
 }
 
 #[derive(Serialize)]
+struct BadUrl {
+    url: String,
+    found_on: Option<String>,
+}
+
+#[derive(Serialize)]
 struct UrlResults {
-    bad_urls: Vec<String>,
+    bad_urls: Vec<BadUrl>,
     url_map: HashMap<String, Vec<String>>,
 }
 fn control_crawl(
@@ -164,6 +188,7 @@ fn control_crawl(
     let start_command = CrawlCommand {
         url: start_url,
         extract_links: true,
+        source_page: None,
     };
     command_sender.send(start_command).unwrap();
     let mut pending_urls = 1;
@@ -180,15 +205,23 @@ fn control_crawl(
                 for url in found_urls.links {
                     if crawl_state.mark_visited(&url) {
                         let extract_links = crawl_state.should_extract_links(&url);
-                        let crawl_command = CrawlCommand { url, extract_links };
+                        let crawl_command = CrawlCommand { 
+                            url, 
+                            extract_links,
+                            source_page: Some(found_urls.url.clone()),
+                        };
                         command_sender.send(crawl_command).unwrap();
                         pending_urls += 1;
                     }
                 }
             }
-            Err((url, error)) => {
-                bad_urls.push(url.clone().to_string());
-                println!("Got crawling error: {:#} for URL {:#}", error, &url);
+            Err((crawl_command, error)) => {
+                let bad_url = BadUrl {
+                    url: crawl_command.url.to_string(),
+                    found_on: crawl_command.source_page.map(|u| u.to_string()),
+                };
+                bad_urls.push(bad_url);
+                println!("Got crawling error: {:#} for URL {:#}", error, &crawl_command.url);
                 continue;
             }
         }
@@ -261,7 +294,11 @@ fn main() {
         if broken_links_count <= 20 {
             println!("\nBroken links:");
             for bad_url in &url_results.bad_urls {
-                println!("  - {}", bad_url);
+                if let Some(source) = &bad_url.found_on {
+                    println!("  - {} (found on: {})", bad_url.url, source);
+                } else {
+                    println!("  - {} (starting URL)", bad_url.url);
+                }
             }
         } else {
             println!("\nSee bad_urls.json for the complete list of broken links.");
