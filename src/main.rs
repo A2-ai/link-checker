@@ -10,6 +10,7 @@ use url::Url;
 use scraper::{Html, Selector};
 use serde::Serialize;
 use thiserror::Error;
+use regex::Regex;
 
 #[derive(Error, Debug)]
 enum Error {
@@ -195,6 +196,7 @@ fn control_crawl(
     start_url: Url,
     command_sender: mpsc::Sender<CrawlCommand>,
     result_receiver: mpsc::Receiver<CrawlResult>,
+    skip_pattern: Option<&Regex>,
 ) -> UrlResults {
     let mut crawl_state = CrawlState::new(&start_url);
     let start_command = CrawlCommand {
@@ -228,8 +230,18 @@ fn control_crawl(
                 }
             }
             Err((crawl_command, error)) => {
+                let url_string = crawl_command.url.to_string();
+                
+                // Check if this URL should be skipped
+                if let Some(regex) = skip_pattern {
+                    if regex.is_match(&url_string) {
+                        println!("Skipping broken link (matches skip pattern): {:#}", url_string);
+                        continue;
+                    }
+                }
+                
                 let bad_url = BadUrl {
-                    url: crawl_command.url.to_string(),
+                    url: url_string,
                     found_on: crawl_command.source_page.map(|u| u.to_string()),
                 };
                 bad_urls.push(bad_url);
@@ -244,11 +256,11 @@ fn control_crawl(
     }
 }
 
-fn check_links(start_url: Url) -> UrlResults {
+fn check_links(start_url: Url, skip_pattern: Option<&Regex>) -> UrlResults {
     let (result_sender, result_receiver) = mpsc::channel::<CrawlResult>();
     let (command_sender, command_receiver) = mpsc::channel::<CrawlCommand>();
     spawn_crawler_threads(command_receiver, result_sender, 8);
-    control_crawl(start_url, command_sender, result_receiver)
+    control_crawl(start_url, command_sender, result_receiver, skip_pattern)
 }
 
 #[derive(Parser)]
@@ -259,13 +271,21 @@ struct Args {
     /// The URL to start crawling from
     #[arg(long, short)]
     url: String,
+    /// Skip broken links matching this regex pattern
+    #[arg(long)]
+    skip: Option<String>,
 }
 
 fn main() {
     let args = Args::parse();
     let start_url = Url::parse(&args.url).expect("Invalid URL provided");
+    
+    let skip_regex = args.skip.as_ref().map(|pattern| {
+        Regex::new(pattern).expect("Invalid regex pattern provided")
+    });
+    
     let start_time = Instant::now();
-    let url_results = check_links(start_url);
+    let url_results = check_links(start_url, skip_regex.as_ref());
 
     let bad_urls_file = File::create("bad_urls.json").unwrap();
     serde_json::to_writer_pretty(bad_urls_file, &url_results.bad_urls).unwrap();
