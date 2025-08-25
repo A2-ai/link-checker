@@ -5,8 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use reqwest::blocking::Client;
-use reqwest::Url;
+use ureq::{Agent, ResponseExt};
+use url::Url;
 use scraper::{Html, Selector};
 use serde::Serialize;
 use thiserror::Error;
@@ -14,7 +14,9 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 enum Error {
     #[error("request error: {0}")]
-    ReqwestError(#[from] reqwest::Error),
+    UreqError(#[from] ureq::Error),
+    #[error("io error: {0}")]
+    IoError(#[from] std::io::Error),
     #[error("bad http response: {0}")]
     BadResponse(String),
 }
@@ -27,59 +29,69 @@ struct CrawlCommand {
 }
 
 
-fn visit_page(client: &Client, command: &CrawlCommand) -> Result<Vec<Url>, Error> {
+fn visit_page(client: &Agent, command: &CrawlCommand) -> Result<Vec<Url>, Error> {
     println!("Checking {:#}", command.url);
     
     // Retry logic for 5xx errors with exponential backoff
     let mut attempts = 0;
     let max_retries = 3;
     loop {
-        let response = client.get(command.url.clone()).send()?;
-        
-        if response.status().is_success() {
-            let mut link_urls = Vec::new();
-            if !command.extract_links {
-                return Ok(link_urls);
-            }
-        
-            let base_url = response.url().to_owned();
-            let body_text = response.text()?;
-            let start_time = Instant::now();
-            let document = Html::parse_document(&body_text);
-        
-            let selector = Selector::parse("a").unwrap();
-            let href_values = document
-                .select(&selector)
-                .filter_map(|element| element.value().attr("href"));
-            for href in href_values {
-                match base_url.join(href) {
-                    Ok(link_url) => {
-                        link_urls.push(link_url);
-                    }
-                    Err(err) => {
-                        println!("On {base_url:#}: ignored unparsable {href:?}: {err}");
+        let result = client.get(command.url.as_str()).call();
+        match result {
+            Ok(mut response) => {
+                let mut link_urls = Vec::new();
+                if !command.extract_links {
+                    return Ok(link_urls);
+                }
+
+                // Use the final URL after redirects
+                let base_url_str = response.get_uri().to_string();
+                let base_url = Url::parse(&base_url_str).unwrap_or_else(|_| command.url.clone());
+                let body_text = response.body_mut().read_to_string()?;
+                let start_time = Instant::now();
+                let document = Html::parse_document(&body_text);
+
+                let selector = Selector::parse("a").unwrap();
+                let href_values = document
+                    .select(&selector)
+                    .filter_map(|element| element.value().attr("href"));
+                for href in href_values {
+                    match base_url.join(href) {
+                        Ok(link_url) => {
+                            link_urls.push(link_url);
+                        }
+                        Err(err) => {
+                            println!("On {base_url:#}: ignored unparsable {href:?}: {err}");
+                        }
                     }
                 }
+                println!(
+                    "Parsed {:#?} and found {:#?} URLs in {:#?}",
+                    command.url.to_string(),
+                    link_urls.len(),
+                    start_time.elapsed()
+                );
+                return Ok(link_urls);
             }
-            println!(
-                "Parsed {:#?} and found {:#?} URLs in {:#?}",
-                command.url.to_string(),
-                link_urls.len(),
-                start_time.elapsed()
-            );
-            return Ok(link_urls);
+            Err(e) => {
+                match e {
+                    ureq::Error::StatusCode(status) => {
+                        if (500..=599).contains(&status) && attempts < max_retries {
+                            attempts += 1;
+                            let delay = Duration::from_millis(100 * (2_u64.pow(attempts - 1)));
+                            println!(
+                                "Got 5xx error for {:#}, retrying in {:#?} (attempt {}/{})",
+                                command.url, delay, attempts, max_retries
+                            );
+                            thread::sleep(delay);
+                            continue;
+                        }
+                        return Err(Error::BadResponse(status.to_string()));
+                    }
+                    other => return Err(Error::UreqError(other)),
+                }
+            }
         }
-        
-        // Check if it's a 5xx error that we should retry
-        if response.status().is_server_error() && attempts < max_retries {
-            attempts += 1;
-            let delay = Duration::from_millis(100 * (2_u64.pow(attempts - 1)));
-            println!("Got 5xx error for {:#}, retrying in {:#?} (attempt {}/{})", command.url, delay, attempts, max_retries);
-            thread::sleep(delay);
-            continue;
-        }
-        
-        return Err(Error::BadResponse(response.status().to_string()));
     }
 
 }
@@ -144,7 +156,7 @@ fn spawn_crawler_threads(
         let result_sender = result_sender.clone();
         let command_receiver = command_receiver.clone();
         thread::spawn(move || {
-            let client = Client::new();
+            let client = Agent::new_with_defaults();
             loop {
                 let command_result = {
                     let receiver_guard = command_receiver.lock().unwrap();
