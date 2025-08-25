@@ -242,6 +242,7 @@ fn check_links(start_url: Url) -> UrlResults {
 #[derive(Parser)]
 #[command(name = "link-checker")]
 #[command(about = "A tool to check the validity of links on a website")]
+#[command(version)]
 struct Args {
     /// The URL to start crawling from
     #[arg(long, short)]
