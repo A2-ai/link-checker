@@ -3,6 +3,19 @@ link-checker
 
 A generic web link checker tool that crawls a website and validates all links within the same domain. The tool starts from a given URL and incrementally discovers and checks all linked pages, building a comprehensive map of the site's link structure and identifying any broken links.
 
+## installation
+
+```
+curl -sSL https://raw.githubusercontent.com/A2-ai/rv/refs/heads/main/scripts/install.sh | bash
+```
+
+or for mac can also:
+
+```
+brew tap a2-ai/homebrew-tap
+brew install link-checker
+```
+
 ## Features
 
 - Multi-threaded crawling for efficient link checking
