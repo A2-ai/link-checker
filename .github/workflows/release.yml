@@ -79,15 +79,15 @@ jobs:
       - name: Archive (UNIX)
         run: |
           mkdir -p artifacts
-          cp -av target/${{ matrix.target }}/release/rv .
-          tar -czf ${{ github.event.repository.name }}-${{ github.ref_name }}-${{ matrix.target }}.tar.gz rv
+          cp -av target/${{ matrix.target }}/release/link-checker .
+          tar -czf ${{ github.event.repository.name }}-${{ github.ref_name }}-${{ matrix.target }}.tar.gz link-checker
         if: ${{ ! startsWith(matrix.os, 'windows') }}
 
       - name: Archive (Windows)
         run: |
           mkdir -p artifacts
-          cp target/${{ matrix.target }}/release/rv.exe .
-          Compress-Archive rv.exe ${{ github.event.repository.name }}-${{ github.ref_name }}-${{ matrix.target }}.zip
+          cp target/${{ matrix.target }}/release/link-checker.exe .
+          Compress-Archive link-checker.exe ${{ github.event.repository.name }}-${{ github.ref_name }}-${{ matrix.target }}.zip
         if: ${{ startsWith(matrix.os, 'windows') }}
 
       - name: Attest Build Provenance
