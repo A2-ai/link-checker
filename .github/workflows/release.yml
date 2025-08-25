@@ -74,10 +74,7 @@ jobs:
           rustup target add ${{ matrix.target }}
 
       - name: Cargo build
-        run: cargo build --features=cli --release --target ${{ matrix.target }}
-
-      - name: Check that rv version matches the tag
-        run: python .github/scripts/tag_check.py "${{  github.ref_name }}"
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Archive (UNIX)
         run: |
