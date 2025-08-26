@@ -6,7 +6,7 @@ A generic web link checker tool that crawls a website and validates all links wi
 ## installation
 
 ```
-curl -sSL https://raw.githubusercontent.com/A2-ai/rv/refs/heads/main/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/A2-ai/link-checker/refs/heads/main/scripts/install.sh | bash
 ```
 
 or for mac can also:
