@@ -246,12 +246,12 @@ log_verbose "=== DOWNLOAD AND INSTALLATION ==="
 log_verbose "Download URL: $asset_url"
 
 # Download the asset using curl, extract it, clean up, and make executable
-echo "Downloading rv from $asset_url"
-curl -L -o rv_latest.tar.gz "$asset_url" &&
-    tar -xzf rv_latest.tar.gz &&
-    rm rv_latest.tar.gz &&
-    chmod +x rv &&
-    echo "rv installed successfully to ~/.local/bin" ||
+echo "Downloading link-checker from $asset_url"
+curl -L -o link-checker_latest.tar.gz "$asset_url" &&
+    tar -xzf link-checker_latest.tar.gz &&
+    rm link-checker_latest.tar.gz &&
+    chmod +x link-checker &&
+    echo "link-checker installed successfully to ~/.local/bin" ||
     (echo "Installation failed." >&2 && exit 1)
 
 log_verbose "Installation completed successfully"
