@@ -46,11 +46,31 @@ fn visit_page(client: &Agent, command: &CrawlCommand) -> Result<Vec<Url>, Error>
                 }
 
                 // Use the final URL after redirects
-                let base_url_str = response.get_uri().to_string();
-                let base_url = Url::parse(&base_url_str).unwrap_or_else(|_| command.url.clone());
+                let page_url_str = response.get_uri().to_string();
+                let page_url = Url::parse(&page_url_str).unwrap_or_else(|_| command.url.clone());
                 let body_text = response.body_mut().read_to_string()?;
                 let start_time = Instant::now();
                 let document = Html::parse_document(&body_text);
+
+                // Check for <base href="..."> element to determine the base URL for relative links
+                let base_url = {
+                    let base_selector = Selector::parse("base[href]").unwrap();
+                    if let Some(base_element) = document.select(&base_selector).next() {
+                        if let Some(base_href) = base_element.value().attr("href") {
+                            match page_url.join(base_href) {
+                                Ok(resolved_base) => resolved_base,
+                                Err(err) => {
+                                    println!("On {page_url:#}: ignored invalid base href {base_href:?}: {err}");
+                                    page_url.clone()
+                                }
+                            }
+                        } else {
+                            page_url.clone()
+                        }
+                    } else {
+                        page_url.clone()
+                    }
+                };
 
                 let selector = Selector::parse("a").unwrap();
                 let href_values = document
@@ -339,4 +359,204 @@ fn main() {
     }
 
     println!("\nCrawling completed in {:#?}", start_time.elapsed());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_html_with_base_href(base_href: &str, links: &[&str]) -> String {
+        let link_elements: String = links
+            .iter()
+            .map(|link| format!(r#"<a href="{}">{}</a>"#, link, link))
+            .collect::<Vec<_>>()
+            .join("\n");
+        
+        format!(
+            r#"<!DOCTYPE html>
+<html>
+<head>
+    <base href="{}">
+</head>
+<body>
+    {}
+</body>
+</html>"#,
+            base_href, link_elements
+        )
+    }
+
+    fn create_test_html_without_base_href(links: &[&str]) -> String {
+        let link_elements: String = links
+            .iter()
+            .map(|link| format!(r#"<a href="{}">{}</a>"#, link, link))
+            .collect::<Vec<_>>()
+            .join("\n");
+        
+        format!(
+            r#"<!DOCTYPE html>
+<html>
+<body>
+    {}
+</body>
+</html>"#,
+            link_elements
+        )
+    }
+
+    fn extract_links_from_html(html: &str, page_url: &str) -> Vec<Url> {
+        let document = Html::parse_document(html);
+        let page_url = Url::parse(page_url).unwrap();
+        
+        // Extract base href logic from visit_page function
+        let base_url = {
+            let base_selector = Selector::parse("base[href]").unwrap();
+            if let Some(base_element) = document.select(&base_selector).next() {
+                if let Some(base_href) = base_element.value().attr("href") {
+                    match page_url.join(base_href) {
+                        Ok(resolved_base) => resolved_base,
+                        Err(_) => page_url.clone(),
+                    }
+                } else {
+                    page_url.clone()
+                }
+            } else {
+                page_url.clone()
+            }
+        };
+
+        let selector = Selector::parse("a").unwrap();
+        let mut link_urls = Vec::new();
+        let href_values = document
+            .select(&selector)
+            .filter_map(|element| element.value().attr("href"));
+        
+        for href in href_values {
+            if let Ok(link_url) = base_url.join(href) {
+                link_urls.push(link_url);
+            }
+        }
+        
+        link_urls
+    }
+
+    #[test]
+    fn test_base_href_absolute_url() {
+        let html = create_test_html_with_base_href(
+            "https://example.com/subdir/",
+            &["page1.html", "page2.html", "/absolute.html"]
+        );
+        
+        let links = extract_links_from_html(&html, "https://original.com/");
+        
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].as_str(), "https://example.com/subdir/page1.html");
+        assert_eq!(links[1].as_str(), "https://example.com/subdir/page2.html");
+        assert_eq!(links[2].as_str(), "https://example.com/absolute.html");
+    }
+
+    #[test]
+    fn test_base_href_relative_to_page() {
+        let html = create_test_html_with_base_href(
+            "subdir/",
+            &["page1.html", "../other.html"]
+        );
+        
+        let links = extract_links_from_html(&html, "https://example.com/current/");
+        
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].as_str(), "https://example.com/current/subdir/page1.html");
+        assert_eq!(links[1].as_str(), "https://example.com/current/other.html");
+    }
+
+    #[test]
+    fn test_no_base_href_uses_page_url() {
+        let html = create_test_html_without_base_href(&["page1.html", "/absolute.html"]);
+        
+        let links = extract_links_from_html(&html, "https://example.com/current/");
+        
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].as_str(), "https://example.com/current/page1.html");
+        assert_eq!(links[1].as_str(), "https://example.com/absolute.html");
+    }
+
+    #[test]
+    fn test_base_href_with_different_protocol() {
+        let html = create_test_html_with_base_href(
+            "ftp://files.example.com/",
+            &["file1.txt", "dir/file2.txt"]
+        );
+        
+        let links = extract_links_from_html(&html, "https://example.com/");
+        
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].as_str(), "ftp://files.example.com/file1.txt");
+        assert_eq!(links[1].as_str(), "ftp://files.example.com/dir/file2.txt");
+    }
+
+    #[test]
+    fn test_base_href_with_absolute_links() {
+        let html = create_test_html_with_base_href(
+            "https://base.example.com/",
+            &["relative.html", "https://external.com/absolute.html", "mailto:test@example.com"]
+        );
+        
+        let links = extract_links_from_html(&html, "https://original.example.com/");
+        
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].as_str(), "https://base.example.com/relative.html");
+        assert_eq!(links[1].as_str(), "https://external.com/absolute.html");
+        assert_eq!(links[2].as_str(), "mailto:test@example.com");
+    }
+
+    #[test]
+    fn test_invalid_base_href_falls_back_to_page_url() {
+        let html = r#"<!DOCTYPE html>
+<html>
+<head>
+    <base href=":::invalid-url:::">
+</head>
+<body>
+    <a href="page1.html">Page 1</a>
+</body>
+</html>"#;
+        
+        let links = extract_links_from_html(html, "https://example.com/current/");
+        
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].as_str(), "https://example.com/current/page1.html");
+    }
+
+    #[test]
+    fn test_base_href_with_fragment_and_query() {
+        let html = create_test_html_with_base_href(
+            "https://example.com/subdir/?param=value#section",
+            &["page1.html", "?other=param"]
+        );
+        
+        let links = extract_links_from_html(&html, "https://original.com/");
+        
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].as_str(), "https://example.com/subdir/page1.html");
+        assert_eq!(links[1].as_str(), "https://example.com/subdir/?other=param");
+    }
+
+    #[test]
+    fn test_multiple_base_href_elements_uses_first() {
+        let html = r#"<!DOCTYPE html>
+<html>
+<head>
+    <base href="https://first.example.com/">
+    <base href="https://second.example.com/">
+</head>
+<body>
+    <a href="page.html">Page</a>
+</body>
+</html>"#;
+        
+        let links = extract_links_from_html(html, "https://original.com/");
+        
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].as_str(), "https://first.example.com/page.html");
+    }
 }
