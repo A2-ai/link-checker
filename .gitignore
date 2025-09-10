@@ -2,3 +2,4 @@
 /.env
 /bad_urls.json
 /url_map.json
+dist/

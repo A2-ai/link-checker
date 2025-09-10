@@ -1,7 +1,7 @@
 link-checker
 ============
 
-A generic web link checker tool that crawls a website and validates all links within the same domain. The tool starts from a given URL and incrementally discovers and checks all linked pages, building a comprehensive map of the site's link structure and identifying any broken links.
+A generic web link checker tool that crawls a website and validates all links. The tool starts from a given URL and incrementally discovers and checks linked pages, building a comprehensive map of the site's link structure and identifying any broken links.
 
 ## installation
 
@@ -19,23 +19,50 @@ brew install link-checker
 ## Features
 
 - Multi-threaded crawling for efficient link checking
-- Domain-scoped crawling (only follows links within the same domain)
+- **Path prefix crawling by default** - only follows links within the same path prefix as the starting URL
+- **Domain-wide crawling option** - with `--domain-match` flag, crawls entire domain
 - Comprehensive link validation with HTTP status checking
 - JSON output with detailed results
 - Simple command-line interface
 
-## Usage
+## Crawling Behavior
 
-To run the link checker:
+### Default: Path Prefix Matching
+
+By default, the crawler only follows links that share the same path prefix as the starting URL:
 
 ```bash
-cargo run -- --url https://example.com
+# This will only crawl URLs under /products/widgets/*
+link-checker --url https://example.com/products/widgets/
 ```
 
-Or using the short form:
+For example:
+- **Crawled**: `https://example.com/products/widgets/item1`
+- **Crawled**: `https://example.com/products/widgets/specs.html` 
+- **Skipped**: `https://example.com/products/gadgets/item2`
+- **Skipped**: `https://example.com/about/`
+
+### Domain-Wide Crawling
+
+Use the `--domain-match` flag to crawl all URLs within the same domain:
 
 ```bash
-cargo run -- -u https://example.com
+# This will crawl ALL pages on example.com
+link-checker --url https://example.com/products/widgets/ --domain-match
+```
+
+## Usage
+
+Basic path-prefix crawling:
+
+```bash
+link-checker --url https://example.com/products/widgets/
+```
+
+Domain-wide crawling:
+
+```bash
+link-checker --url https://example.com --domain-match
 ```
 
 ## Output
