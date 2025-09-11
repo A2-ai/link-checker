@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::sync::{mpsc, Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -12,6 +12,9 @@ use scraper::{Html, Selector};
 use serde::Serialize;
 use thiserror::Error;
 use regex::Regex;
+
+// Import from our library
+use link_checker::{CrawlState, is_absolute_url, is_likely_html_content, format_bytes};
 
 #[derive(Error, Debug)]
 enum Error {
@@ -30,40 +33,6 @@ struct CrawlCommand {
     source_page: Option<Url>,
 }
 
-
-fn is_absolute_url(href: &str) -> bool {
-    // Check if URL has a scheme (protocol) like http://, https://, ftp://, mailto:, etc.
-    href.contains("://") || href.starts_with("mailto:") || href.starts_with("tel:")
-}
-
-fn is_likely_html_content(url: &Url) -> bool {
-    let path = url.path().to_lowercase();
-    
-    // If no extension or ends with /, assume it's HTML
-    if path.is_empty() || path.ends_with('/') {
-        return true;
-    }
-    
-    // Check for HTML-like extensions
-    if let Some(extension) = path.split('.').last() {
-        matches!(extension, 
-            "html" | "htm" | "php" | "asp" | "aspx" | "jsp" | "cfm" | "cgi" | "pl" | "py" | "rb"
-        )
-    } else {
-        // No extension, likely HTML
-        true
-    }
-}
-
-fn format_bytes(bytes: usize) -> String {
-    if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1_024 {
-        format!("{:.1} KB", bytes as f64 / 1_024.0)
-    } else {
-        format!("{} B", bytes)
-    }
-}
 
 fn visit_page(client: &Agent, command: &CrawlCommand, total_bytes: &Arc<AtomicUsize>) -> Result<Vec<Url>, Error> {
     println!("Checking {:#}", command.url);
@@ -239,71 +208,6 @@ fn visit_page(client: &Agent, command: &CrawlCommand, total_bytes: &Arc<AtomicUs
 
 }
 
-struct CrawlState {
-    domain: String,
-    start_url_path: String,
-    domain_match: bool,
-    visited_pages: HashSet<String>,
-}
-
-impl CrawlState {
-    fn new(start_url: &Url, domain_match: bool) -> CrawlState {
-        let mut visited_pages = HashSet::new();
-        let normalized_url = Self::normalize_url(start_url);
-        visited_pages.insert(normalized_url);
-        CrawlState {
-            domain: start_url.domain().unwrap().to_string(),
-            start_url_path: start_url.path().to_string(),
-            domain_match,
-            visited_pages,
-        }
-    }
-
-    /// Remove the fragment (hash) part of a URL to avoid treating
-    /// page.html#section1 and page.html#section2 as different pages
-    fn normalize_url(url: &Url) -> String {
-        let mut normalized = url.clone();
-        normalized.set_fragment(None);
-        normalized.to_string()
-    }
-
-    /// Determine whether a URL should be visited at all.
-    /// By default, only visit URLs with the same path prefix.
-    /// If domain_match is enabled, visit any URL in the same domain.
-    fn should_visit_url(&self, url: &Url) -> bool {
-        let Some(url_domain) = url.domain() else {
-            return false;
-        };
-        
-        // Must be in the same domain
-        if url_domain != self.domain {
-            return false;
-        }
-        
-        // If domain_match is enabled, any URL in the domain is allowed
-        if self.domain_match {
-            return true;
-        }
-        
-        // Otherwise, check if the URL path starts with the same prefix as the start URL
-        url.path().starts_with(&self.start_url_path)
-    }
-
-    /// Determine whether links within the given page should be extracted.
-    /// By default, only extract links from pages with the same path prefix.
-    /// If domain_match is enabled, extract from any page in the same domain.
-    fn should_extract_links(&self, url: &Url) -> bool {
-        // Use the same logic as should_visit_url for now
-        self.should_visit_url(url)
-    }
-
-    /// Mark the given page as visited, returning false if it had already
-    /// been visited. Uses normalized URL (without fragment) for comparison.
-    fn mark_visited(&mut self, url: &Url) -> bool {
-        let normalized_url = Self::normalize_url(url);
-        self.visited_pages.insert(normalized_url)
-    }
-}
 
 #[derive(Debug)]
 struct FoundUrls {
@@ -590,208 +494,4 @@ fn main() {
     let interrupted = shutdown_flag.load(Ordering::Relaxed);
     
     print_summary_and_save(&url_results, start_time, interrupted, total_bytes_downloaded);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn create_test_html_with_base_href(base_href: &str, links: &[&str]) -> String {
-        let link_elements: String = links
-            .iter()
-            .map(|link| format!(r#"<a href="{}">{}</a>"#, link, link))
-            .collect::<Vec<_>>()
-            .join("\n");
-        
-        format!(
-            r#"<!DOCTYPE html>
-<html>
-<head>
-    <base href="{}">
-</head>
-<body>
-    {}
-</body>
-</html>"#,
-            base_href, link_elements
-        )
-    }
-
-    fn create_test_html_without_base_href(links: &[&str]) -> String {
-        let link_elements: String = links
-            .iter()
-            .map(|link| format!(r#"<a href="{}">{}</a>"#, link, link))
-            .collect::<Vec<_>>()
-            .join("\n");
-        
-        format!(
-            r#"<!DOCTYPE html>
-<html>
-<body>
-    {}
-</body>
-</html>"#,
-            link_elements
-        )
-    }
-
-    fn extract_links_from_html(html: &str, page_url: &str) -> Vec<Url> {
-        let document = Html::parse_document(html);
-        let page_url = Url::parse(page_url).unwrap();
-        
-        // Extract base href logic from visit_page function
-        let base_url = {
-            let base_selector = Selector::parse("base[href]").unwrap();
-            if let Some(base_element) = document.select(&base_selector).next() {
-                if let Some(base_href) = base_element.value().attr("href") {
-                    match page_url.join(base_href) {
-                        Ok(resolved_base) => resolved_base,
-                        Err(_) => page_url.clone(),
-                    }
-                } else {
-                    page_url.clone()
-                }
-            } else {
-                page_url.clone()
-            }
-        };
-
-        let selector = Selector::parse("a").unwrap();
-        let mut link_urls = Vec::new();
-        let href_values = document
-            .select(&selector)
-            .filter_map(|element| element.value().attr("href"));
-        
-        for href in href_values {
-            // Only follow relative URLs - skip absolute URLs
-            if is_absolute_url(href) {
-                continue;
-            }
-            
-            if let Ok(link_url) = base_url.join(href) {
-                link_urls.push(link_url);
-            }
-        }
-        
-        link_urls
-    }
-
-    #[test]
-    fn test_base_href_absolute_url() {
-        let html = create_test_html_with_base_href(
-            "https://example.com/subdir/",
-            &["page1.html", "page2.html", "/absolute.html"]
-        );
-        
-        let links = extract_links_from_html(&html, "https://original.com/");
-        
-        assert_eq!(links.len(), 3);
-        assert_eq!(links[0].as_str(), "https://example.com/subdir/page1.html");
-        assert_eq!(links[1].as_str(), "https://example.com/subdir/page2.html");
-        assert_eq!(links[2].as_str(), "https://example.com/absolute.html");
-    }
-
-    #[test]
-    fn test_base_href_relative_to_page() {
-        let html = create_test_html_with_base_href(
-            "subdir/",
-            &["page1.html", "../other.html"]
-        );
-        
-        let links = extract_links_from_html(&html, "https://example.com/current/");
-        
-        assert_eq!(links.len(), 2);
-        assert_eq!(links[0].as_str(), "https://example.com/current/subdir/page1.html");
-        assert_eq!(links[1].as_str(), "https://example.com/current/other.html");
-    }
-
-    #[test]
-    fn test_no_base_href_uses_page_url() {
-        let html = create_test_html_without_base_href(&["page1.html", "/absolute.html"]);
-        
-        let links = extract_links_from_html(&html, "https://example.com/current/");
-        
-        assert_eq!(links.len(), 2);
-        assert_eq!(links[0].as_str(), "https://example.com/current/page1.html");
-        assert_eq!(links[1].as_str(), "https://example.com/absolute.html");
-    }
-
-    #[test]
-    fn test_base_href_with_different_protocol() {
-        let html = create_test_html_with_base_href(
-            "ftp://files.example.com/",
-            &["file1.txt", "dir/file2.txt"]
-        );
-        
-        let links = extract_links_from_html(&html, "https://example.com/");
-        
-        assert_eq!(links.len(), 2);
-        assert_eq!(links[0].as_str(), "ftp://files.example.com/file1.txt");
-        assert_eq!(links[1].as_str(), "ftp://files.example.com/dir/file2.txt");
-    }
-
-    #[test]
-    fn test_base_href_with_absolute_links() {
-        let html = create_test_html_with_base_href(
-            "https://base.example.com/",
-            &["relative.html", "https://external.com/absolute.html", "mailto:test@example.com"]
-        );
-        
-        let links = extract_links_from_html(&html, "https://original.example.com/");
-        
-        // Only relative URLs should be followed, absolute URLs are filtered out
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].as_str(), "https://base.example.com/relative.html");
-    }
-
-    #[test]
-    fn test_invalid_base_href_falls_back_to_page_url() {
-        let html = r#"<!DOCTYPE html>
-<html>
-<head>
-    <base href=":::invalid-url:::">
-</head>
-<body>
-    <a href="page1.html">Page 1</a>
-</body>
-</html>"#;
-        
-        let links = extract_links_from_html(html, "https://example.com/current/");
-        
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].as_str(), "https://example.com/current/page1.html");
-    }
-
-    #[test]
-    fn test_base_href_with_fragment_and_query() {
-        let html = create_test_html_with_base_href(
-            "https://example.com/subdir/?param=value#section",
-            &["page1.html", "?other=param"]
-        );
-        
-        let links = extract_links_from_html(&html, "https://original.com/");
-        
-        assert_eq!(links.len(), 2);
-        assert_eq!(links[0].as_str(), "https://example.com/subdir/page1.html");
-        assert_eq!(links[1].as_str(), "https://example.com/subdir/?other=param");
-    }
-
-    #[test]
-    fn test_multiple_base_href_elements_uses_first() {
-        let html = r#"<!DOCTYPE html>
-<html>
-<head>
-    <base href="https://first.example.com/">
-    <base href="https://second.example.com/">
-</head>
-<body>
-    <a href="page.html">Page</a>
-</body>
-</html>"#;
-        
-        let links = extract_links_from_html(html, "https://original.com/");
-        
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].as_str(), "https://first.example.com/page.html");
-    }
 }
