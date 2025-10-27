@@ -45,6 +45,30 @@ pub fn format_bytes(bytes: usize) -> String {
     }
 }
 
+/// Add a trailing slash to a URL if it doesn't have one and doesn't end with a file extension.
+/// This helps with relative link resolution.
+pub fn add_trailing_slash_if_needed(url: Url) -> Url {
+    let path = url.path();
+
+    // If already ends with slash, return as-is
+    if path.ends_with('/') {
+        return url;
+    }
+
+    // Check if the last segment has an extension
+    if let Some(last_segment) = path.split('/').last() {
+        if last_segment.contains('.') {
+            // Has an extension, don't add trailing slash
+            return url;
+        }
+    }
+
+    // No trailing slash and no extension, add one
+    let mut modified_url = url.clone();
+    modified_url.set_path(&format!("{}/", path));
+    modified_url
+}
+
 pub struct CrawlState {
     domain: String,
     start_url_path: String,
@@ -354,16 +378,87 @@ mod tests {
             "https://example.com:8080/path/",
             "https://subdomain.example.com/path/",
         ];
-        
+
         for url_str in edge_case_urls {
             let url = Url::parse(url_str).unwrap();
             let start_url = Url::parse("https://example.com/path/").unwrap();
             let crawl_state = CrawlState::new(&start_url, false);
-            
+
             // Should not panic and should return boolean
             let _ = crawl_state.should_visit_url(&url);
             let _ = is_likely_html_content(&url);
             let _ = is_absolute_url(url.as_str());
         }
+    }
+
+    // ===== Trailing Slash Tests =====
+
+    #[test]
+    fn test_add_trailing_slash_if_needed() {
+        // URLs that should get a trailing slash (no extension)
+        let test_cases = vec![
+            ("https://example.com/page", "https://example.com/page/"),
+            ("https://example.com/dir/subdir", "https://example.com/dir/subdir/"),
+            ("https://example.com/rv-docs/r_version", "https://example.com/rv-docs/r_version/"),
+            ("https://example.com/api/v1/users", "https://example.com/api/v1/users/"),
+        ];
+
+        for (input, expected) in test_cases {
+            let url = Url::parse(input).unwrap();
+            let result = add_trailing_slash_if_needed(url);
+            assert_eq!(result.as_str(), expected, "Failed for input: {}", input);
+        }
+    }
+
+    #[test]
+    fn test_add_trailing_slash_already_has_slash() {
+        // URLs that already have trailing slash should not be modified
+        let test_cases = vec![
+            "https://example.com/",
+            "https://example.com/page/",
+            "https://example.com/dir/subdir/",
+            "https://example.com/rv-docs/",
+        ];
+
+        for input in test_cases {
+            let url = Url::parse(input).unwrap();
+            let result = add_trailing_slash_if_needed(url);
+            assert_eq!(result.as_str(), input, "URL with trailing slash should not change: {}", input);
+        }
+    }
+
+    #[test]
+    fn test_add_trailing_slash_with_extension() {
+        // URLs with file extensions should not get trailing slash
+        let test_cases = vec![
+            "https://example.com/page.html",
+            "https://example.com/document.pdf",
+            "https://example.com/image.jpg",
+            "https://example.com/style.css",
+            "https://example.com/script.js",
+            "https://example.com/data.json",
+        ];
+
+        for input in test_cases {
+            let url = Url::parse(input).unwrap();
+            let result = add_trailing_slash_if_needed(url);
+            assert_eq!(result.as_str(), input, "URL with extension should not change: {}", input);
+        }
+    }
+
+    #[test]
+    fn test_add_trailing_slash_with_query_params() {
+        // URLs with query parameters should get trailing slash added to path
+        let url = Url::parse("https://example.com/page?query=value").unwrap();
+        let result = add_trailing_slash_if_needed(url);
+        assert_eq!(result.as_str(), "https://example.com/page/?query=value");
+    }
+
+    #[test]
+    fn test_add_trailing_slash_root_path() {
+        // Root path should already have trailing slash
+        let url = Url::parse("https://example.com/").unwrap();
+        let result = add_trailing_slash_if_needed(url);
+        assert_eq!(result.as_str(), "https://example.com/");
     }
 }

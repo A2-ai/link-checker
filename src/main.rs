@@ -14,7 +14,7 @@ use thiserror::Error;
 use regex::Regex;
 
 // Import from our library
-use link_checker::{CrawlState, is_absolute_url, is_likely_html_content, format_bytes};
+use link_checker::{CrawlState, is_absolute_url, is_likely_html_content, format_bytes, add_trailing_slash_if_needed};
 
 #[derive(Error, Debug)]
 enum Error {
@@ -360,7 +360,15 @@ fn control_crawl(
     total_bytes: Arc<AtomicUsize>,
     domain_match: bool,
     skip_pattern: Option<&Regex>,
+    add_trailing_slashes: bool,
 ) -> (UrlResults, usize) {
+    // Apply trailing slash normalization to start URL if enabled
+    let start_url = if add_trailing_slashes {
+        add_trailing_slash_if_needed(start_url)
+    } else {
+        start_url
+    };
+
     let mut crawl_state = CrawlState::new(&start_url, domain_match);
     let start_command = CrawlCommand {
         url: start_url,
@@ -395,18 +403,26 @@ fn control_crawl(
                     if shutdown_flag.load(Ordering::Relaxed) {
                         break;
                     }
+
+                    // Apply trailing slash normalization if enabled
+                    let url = if add_trailing_slashes {
+                        add_trailing_slash_if_needed(url)
+                    } else {
+                        url
+                    };
+
                     // First check if we should visit this URL at all
                     if !crawl_state.should_visit_url(&url) {
                         continue;
                     }
-                    
+
                     if crawl_state.mark_visited(&url) {
                         let should_extract = crawl_state.should_extract_links(&url);
                         // Only extract links from HTML content if we're in the same domain
                         let extract_links = should_extract && is_likely_html_content(&url);
-                        
-                        let crawl_command = CrawlCommand { 
-                            url, 
+
+                        let crawl_command = CrawlCommand {
+                            url,
                             extract_links,
                             source_page: Some(found_urls.url.clone()),
                         };
@@ -444,12 +460,12 @@ fn control_crawl(
     }, bytes_downloaded)
 }
 
-fn check_links(start_url: Url, shutdown_flag: Arc<AtomicBool>, domain_match: bool, skip_pattern: Option<&Regex>) -> (UrlResults, usize) {
+fn check_links(start_url: Url, shutdown_flag: Arc<AtomicBool>, domain_match: bool, skip_pattern: Option<&Regex>, add_trailing_slashes: bool) -> (UrlResults, usize) {
     let (result_sender, result_receiver) = mpsc::channel::<CrawlResult>();
     let (command_sender, command_receiver) = mpsc::channel::<CrawlCommand>();
     let total_bytes = Arc::new(AtomicUsize::new(0));
     spawn_crawler_threads(command_receiver, result_sender, 8, shutdown_flag.clone(), total_bytes.clone());
-    control_crawl(start_url, command_sender, result_receiver, shutdown_flag, total_bytes, domain_match, skip_pattern)
+    control_crawl(start_url, command_sender, result_receiver, shutdown_flag, total_bytes, domain_match, skip_pattern, add_trailing_slashes)
 }
 
 #[derive(Parser)]
@@ -460,38 +476,45 @@ struct Args {
     /// The URL to start crawling from
     #[arg(long, short)]
     url: String,
-    
+
     /// Enable domain-wide crawling (default: only crawl URLs with the same path prefix)
     #[arg(long, help = "Crawl all URLs within the same domain, not just those with matching path prefix")]
     domain_match: bool,
-    
+
     /// Skip broken links matching this regex pattern
     #[arg(long)]
     skip: Option<String>,
+
+    /// Disable automatic addition of trailing slashes to URLs without extensions
+    #[arg(long, help = "Disable adding trailing slashes to URLs without file extensions (default: adds trailing slashes)")]
+    no_add_trailing_slashes: bool,
 }
 
 fn main() {
     let args = Args::parse();
     let start_url = Url::parse(&args.url).expect("Invalid URL provided");
-    
+
     let skip_regex = args.skip.as_ref().map(|pattern| {
         Regex::new(pattern).expect("Invalid regex pattern provided")
     });
-    
+
+    // By default, add trailing slashes (unless --no-add-trailing-slashes is specified)
+    let add_trailing_slashes = !args.no_add_trailing_slashes;
+
     let start_time = Instant::now();
-    
+
     // Set up shutdown flag for graceful interruption handling
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let shutdown_flag_clone = shutdown_flag.clone();
-    
+
     // Set up Ctrl+C handler
     ctrlc::set_handler(move || {
         println!("\nReceived interrupt signal (Ctrl+C)...");
         shutdown_flag_clone.store(true, Ordering::Relaxed);
     }).expect("Error setting Ctrl+C handler");
-    
-    let (url_results, total_bytes_downloaded) = check_links(start_url, shutdown_flag.clone(), args.domain_match, skip_regex.as_ref());
+
+    let (url_results, total_bytes_downloaded) = check_links(start_url, shutdown_flag.clone(), args.domain_match, skip_regex.as_ref(), add_trailing_slashes);
     let interrupted = shutdown_flag.load(Ordering::Relaxed);
-    
+
     print_summary_and_save(&url_results, start_time, interrupted, total_bytes_downloaded);
 }
