@@ -1,6 +1,7 @@
 name: Update Homebrew Formula
 
 on:
+  workflow_dispatch:
   release:
     types: [released]
 
@@ -21,7 +22,6 @@ jobs:
         run: |
           brew tap A2-ai/homebrew-tap
           brew bump-formula-pr --no-browse --no-audit \
-            --tap=A2-ai/homebrew-tap \
             --tag=${{ github.ref_name }} \
             --revision=${{ github.sha }} \
-            link-checker
+            a2-ai/homebrew-tap/link-checker
